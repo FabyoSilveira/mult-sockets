@@ -5,6 +5,8 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <pthread.h>
+#include <time.h>
 
 #define BUFFER_SIZE 1024
 #define MESSAGE_SIZE 2048
@@ -16,12 +18,19 @@
 #define ERROR 7
 #define OK 8
 
+#define MAX_CLIENTS 15
+
 typedef struct {
   int idMsg;
   int idSender;
   int idReceiver;
   char message[2048];
 } Payload;
+
+int clientsIdDb[MAX_CLIENTS] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+int myID; 
+
+bool connectedToServer = 1;
 
 int createAndConnectSockToServerIPV4orIPV6(char* ip, int port){
   int sock;
@@ -50,7 +59,7 @@ int createAndConnectSockToServerIPV4orIPV6(char* ip, int port){
       return -1;
     }
 
-    printf("Conectado com sucesso ao server %s porta %d\n", ip, port);
+    //printf("Conectado com sucesso ao server %s porta %d\n", ip, port);
 
   //IPV6
   }else if(inet_pton(AF_INET6, ip, &servAddrV6.sin6_addr) == 1){
@@ -74,7 +83,7 @@ int createAndConnectSockToServerIPV4orIPV6(char* ip, int port){
       return -1;
     }
 
-    printf("Conectado com sucesso ao server %s porta %d\n", ip, port);
+    //printf("Conectado com sucesso ao server %s porta %d\n", ip, port);
   }
 
   return sock;
@@ -100,6 +109,84 @@ void closeSocket(int sock){
   }
 }
 
+void *handleServer(void *arg) {
+  int sock = *(int *)arg;
+  Payload serverMessage;
+  char bufferServerMessage[sizeof(Payload)];
+
+  while (connectedToServer) {  
+    //Receive from server and resolve struct
+    int recvReturn = recv(sock, bufferServerMessage, sizeof(Payload), 0);
+    memcpy(&serverMessage, bufferServerMessage, sizeof(Payload));
+
+    if (recvReturn <= 0) {
+      break;
+    }
+
+    if(serverMessage.idMsg == MSG){     
+      //Added user message
+      if(serverMessage.idReceiver == -1){     
+        //Search for an empty space in DB and add the new userID
+        for(int i=0; i < MAX_CLIENTS; i++){
+          if(clientsIdDb[i] == -1){
+            clientsIdDb[i] = serverMessage.idSender;
+            break;
+          }
+        }
+        printf("%s\n", serverMessage.message);
+
+      //Private message
+      }else{
+        //Retrieve time from system
+        time_t systemNow = time(NULL);
+        struct tm* localTime = localtime(&systemNow);
+
+        // Format string with retrieved time
+        char timeStr[6];
+        strftime(timeStr, sizeof(timeStr), "%H:%M", localTime);
+
+        printf("P [%s] %02d: %s\n", timeStr, serverMessage.idSender, serverMessage.message);
+      }
+      
+    }else if(serverMessage.idMsg == OK){
+      //Confirmação de solicitação de desconexão da rede
+      if(serverMessage.idSender == -1){
+        printf("%s\n", serverMessage.message);
+        connectedToServer = 0;
+        break;
+
+      //Confirmação de mensagem privada
+      }else if(serverMessage.idSender != -1){
+        //Retrieve time from system
+        time_t systemNow = time(NULL);
+        struct tm* localTime = localtime(&systemNow);
+
+        // Format string with retrieved time
+        char timeStr[6];
+        strftime(timeStr, sizeof(timeStr), "%H:%M", localTime);
+
+        printf("P [%s] -> %02d: %s\n", timeStr, serverMessage.idReceiver, serverMessage.message);
+      }
+      
+    }else if(serverMessage.idMsg == ERROR){
+      printf("%s\n", serverMessage.message);
+
+    //Server warning a client left the group
+    }else if(serverMessage.idMsg == REQ_REM){
+      printf("User %02d left the group!\n", serverMessage.idSender);
+      //Search and remove client from database
+      for(int i=0; i < MAX_CLIENTS; i++){
+        if(clientsIdDb[i] == serverMessage.idSender){
+          clientsIdDb[i] = -1;
+        }
+      }
+    }
+  }
+
+  close(sock);
+  pthread_exit(NULL);
+}
+
 int main(int argc, char *argv[]){
   char keyBoardBuffer[BUFFER_SIZE];
   Payload *request = malloc(sizeof(Payload));
@@ -110,9 +197,9 @@ int main(int argc, char *argv[]){
   char *ip = argv[1];
   int port = atoi(argv[2]);
 
-  printf("Client running!\n");
-  printf("Endereço IP: %s\n", argv[1]);
-  printf("Porta de conexão: %s\n", argv[2]);
+  //printf("Client running!\n");
+  //printf("Endereço IP: %s\n", argv[1]);
+  //printf("Porta de conexão: %s\n", argv[2]);
 
   int sock;
 
@@ -130,33 +217,74 @@ int main(int argc, char *argv[]){
   memcpy(&response, bufferResponse, sizeof(Payload));
   printf("%s\n", response.message);
 
+  //Get my id from server confirmation and store
+  myID = response.idSender;
+
   if(response.idMsg == ERROR){
     close(sock);
     return 0;
   }
 
   //Receive all users list
-  /* recv(sock, &serverResponseBuffer, sizeof(serverResponseBuffer), 0);
-  printf("%s\n", serverResponseBuffer.message); */
+  recv(sock, bufferResponse, sizeof(Payload), 0);
+  memcpy(&response, bufferResponse, sizeof(Payload));
 
-  while(1){
+  //Get the list of users and store in the database
+  char *token = strtok(response.message, ", ");
+  int count = 0;
+  while (token != NULL) {
+    clientsIdDb[count] = atoi(token);
+    count++;
+
+    token = strtok(NULL, ", ");
+  }
+
+  //Create thread to receive data from client while receiving data from keyboard below
+  pthread_t serverThread;
+  if (pthread_create(&serverThread, NULL, handleServer, (void *)&sock) != 0) {
+    perror("Erro ao criar a thread");
+    exit(EXIT_FAILURE);
+  }
+
+  while(connectedToServer){
     fgets(keyBoardBuffer, sizeof(keyBoardBuffer), stdin);
 
     //Clear string \n
-    keyBoardBuffer[strcspn(keyBoardBuffer, "\n")] = '\0'; 
-
-    strcpy(request->message, keyBoardBuffer);
-
-    //Prepare struct to send through socket
-    memcpy(bufferRequest, request, sizeof(Payload));
-    send(sock, bufferRequest, sizeof(Payload), 0);
+    keyBoardBuffer[strcspn(keyBoardBuffer, "\n")] = '\0';
 
     if(strcmp(keyBoardBuffer, "close connection") == 0){
-      printf("close connection\n");
+      //Build payload
+      request->idMsg = REQ_REM;
+      request->idSender = myID;
+
+      //Prepare struct to send through socket
+      memcpy(bufferRequest, request, sizeof(Payload));
+      send(sock, bufferRequest, sizeof(Payload), 0);
+
+      //Wait for serverThread to set connection is over
+      pthread_join(serverThread, NULL);
     }else if(strcmp(keyBoardBuffer, "list users") == 0){
-      printf("list users\n");
+      //Print the list of users retrieve from usersDB
+      for(int i=0; i < MAX_CLIENTS; i++){
+        if(clientsIdDb[i] != -1 && clientsIdDb[i] != myID){
+          printf("%02d ", clientsIdDb[i]);
+        }
+      }
+      printf("\n");
     }else if(strstr(keyBoardBuffer, "send to") != NULL){
-      printf("send private message\n");
+      int idReceiver;
+      char message[2048];
+      sscanf(keyBoardBuffer, "send to %d \"%[^\"]\"", &idReceiver, message);
+
+      //Build payload
+      request->idMsg = MSG;
+      request->idSender = myID;
+      request->idReceiver = idReceiver;
+      strcpy(request->message, message);
+
+      //Prepare struct to send through socket
+      memcpy(bufferRequest, request, sizeof(Payload));
+      send(sock, bufferRequest, sizeof(Payload), 0);
     }else if(strstr(keyBoardBuffer, "send all") != NULL){
       printf("send broadcast message\n");
     }  

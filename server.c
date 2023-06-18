@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <time.h>
 
 #define BUFFER_SIZE 1024
 #define MESSAGE_SIZE 2048
@@ -44,7 +45,7 @@ int createAndConfigureSocketIPV4(int port){
     return -1;
   }
 
-  printf("Socket criado com sucesso!\n");
+  //printf("Socket criado com sucesso!\n");
 
   //Config server addr structure
   memset(&servAddr, 0, sizeof(servAddr));
@@ -58,7 +59,7 @@ int createAndConfigureSocketIPV4(int port){
     return -1;
   }
 
-  printf("Socket associado a porta e endereço com sucesso!\n");
+  //printf("Socket associado a porta e endereço com sucesso!\n");
 
   ///Wait for a client to connect
   if (listen(sockfd, 1) < 0) {
@@ -66,7 +67,7 @@ int createAndConfigureSocketIPV4(int port){
     return -1;
   }
 
-  printf("Socket server ouvindo a porta: %d\n", port);
+  //printf("Socket server ouvindo a porta: %d\n", port);
 
   return sockfd;
 }
@@ -81,8 +82,6 @@ int receiveClientConnectionIPV4(int serverSock){
     printf("Accept conexão do cliente falhou!\n");
     return -1;
   }
-
-  printf("Cliente conectado!\n");
 
   return newSock;
 }
@@ -157,12 +156,31 @@ void closeSockets(int serverSock, int cliSock){
   }
 }
 
-void *handle_client(void *arg) {
+void clearPayload(Payload *payload){
+  payload->idReceiver = -1;
+  payload->idSender = -1;
+  payload->idMsg = -1;
+}
+
+void *handleClient(void *arg) {
   int cliSock = *(int *)arg;
-  Payload cliRequest;
+  Payload cliRequest = {
+    .idSender = -1,
+    .idMsg = -1,
+    .idReceiver = -1
+  };
   char bufferRequest[sizeof(Payload)];
 
-  while (1) {  
+  Payload *response = malloc(sizeof(Payload)); 
+  *response = (Payload) {
+    .idSender = -1,
+    .idMsg = -1,
+    .idReceiver = -1
+  };
+
+  char bufferResponse[sizeof(Payload)];
+
+  while (1){  
     //Receive from client and resolve struct
     int recvReturn = recv(cliSock, bufferRequest, sizeof(Payload), 0);
     memcpy(&cliRequest, bufferRequest, sizeof(Payload));
@@ -171,12 +189,115 @@ void *handle_client(void *arg) {
       break;
     }
 
-    printf("Mensagem recebida do cliente: %s\n", cliRequest.message);
+    if(cliRequest.idMsg == MSG){     
+      bool userFound = false;
+      //Search target of the message
+      for(int i=0; i < MAX_CLIENTS; i++){
+        if(clients[i].id == cliRequest.idReceiver){
+          userFound = true;
+          //Build confirmation payload
+          response->idMsg = OK;
+          strcpy(response->message, cliRequest.message);
+          response->idReceiver = cliRequest.idReceiver;
+          response->idSender = cliRequest.idSender;
+
+          //Send information that the target was found successfully
+          memcpy(bufferResponse, response, sizeof(Payload));
+          send(cliSock, bufferResponse, sizeof(Payload), 0);
+
+          //Build message payload
+          response->idMsg = MSG;
+
+          //Send message to the target
+          memcpy(bufferResponse, response, sizeof(Payload));
+          send(clients[i].socket, bufferResponse, sizeof(Payload), 0);
+          clearPayload(response);
+        }
+      }
+
+      if(!userFound){
+        //Build payload
+        char *message = "Receiver not found";
+        response->idMsg = ERROR;
+        strcpy(response->message, message);
+        response->idReceiver = cliRequest.idSender;
+
+        //Send information that the target was not found
+        memcpy(bufferResponse, response, sizeof(Payload));
+        send(cliSock, bufferResponse, sizeof(Payload), 0);
+        clearPayload(response);
+      }
+
+    }else if(cliRequest.idMsg == REQ_REM){
+      bool userFound = false;
+      //Search user to remove it
+      for(int i=0; i < MAX_CLIENTS; i++){
+        if(clients[i].id == cliRequest.idSender){
+          //Remove client and decrease client counter
+          userFound = true;
+          clients[i].id = -1;
+          clients[i].socket = -1;
+          numClients--;
+        }
+      }
+
+      //if user was removed
+      if(userFound){
+        //Build payload
+        char *message = "Removed Successfully";
+        response->idMsg = OK;
+        strcpy(response->message, message);
+        response->idReceiver = cliRequest.idSender;
+
+        //Send response
+        memcpy(bufferResponse, response, sizeof(Payload));
+        send(cliSock, bufferResponse, sizeof(Payload), 0);
+        clearPayload(response);
+
+        printf("User %02d removed\n", cliRequest.idSender);
+
+        //Build payload
+        response->idMsg = REQ_REM;
+        response->idSender = cliRequest.idSender;
+        //Send broadcast message to all clients telling one client was removed
+        for(int j=0; j < MAX_CLIENTS; j++){
+          if(clients[j].id != -1){
+            //Prepare struct to send through socket
+            memcpy(bufferResponse, response, sizeof(Payload));
+            send(clients[j].socket, bufferResponse, sizeof(Payload), 0);
+          }
+        }
+      }else{
+        //Build payload
+        char *message = "User not found";
+        response->idMsg = ERROR;
+        strcpy(response->message, message);
+        response->idReceiver = cliRequest.idSender;
+
+        //Send response
+        memcpy(bufferResponse, response, sizeof(Payload));
+        send(cliSock, bufferResponse, sizeof(Payload), 0);
+        clearPayload(response);
+      }
+    }
   }
 
-  printf("Cliente desconectado\n");
   close(cliSock);
   pthread_exit(NULL);
+}
+
+char *concatIntArray(int *clientArray, int numClients) {
+  char *result = malloc(numClients * 4 + 1);
+
+  for (int i = 0; i < numClients; i++) {
+    sprintf(result + strlen(result), "%d", clientArray[i]);
+
+    if (i < numClients - 1) {
+      strcat(result, ", ");
+    }
+  }
+
+  return result;
 }
 
 int main(int argc, char *argv[]){
@@ -186,10 +307,21 @@ int main(int argc, char *argv[]){
     clients[i].socket = -1;
   }
 
-  Payload cliRequest;
+  Payload cliRequest = {
+    .idSender = -1,
+    .idMsg = -1,
+    .idReceiver = -1
+  };
+
   char bufferCliRequest[sizeof(Payload)];
 
   Payload *response = malloc(sizeof(Payload)); 
+  *response = (Payload) {
+    .idSender = -1,
+    .idMsg = -1,
+    .idReceiver = -1
+  };
+
   char bufferResponse[sizeof(Payload)];
 
   char buffer[BUFFER_SIZE];
@@ -197,21 +329,21 @@ int main(int argc, char *argv[]){
   char *ipVersion = argv[1];
   int port = atoi(argv[2]);
 
-  printf("Server running!\n");
-  printf("Versão IP: %s\n", argv[1]);
-  printf("Porta: %s\n", argv[2]);
+  //printf("Server running!\n");
+  //printf("Versão IP: %s\n", argv[1]);
+  //printf("Porta: %s\n", argv[2]);
 
   int sockfd, cliSock;
   
   if(strcmp(ipVersion, "v4") == 0){
-    printf("Configurando conexão IPV4!\n");
+    //printf("Configurando conexão IPV4!\n");
 
     //Create sock and accept client connection
     if((sockfd = createAndConfigureSocketIPV4(port)) < 0){
       return 0;
     }
 
-    printf("IPV4 configurado com sucesso!\n");
+    //printf("IPV4 configurado com sucesso!\n");
   }else if(strcmp(ipVersion, "v6") == 0){
     printf("Configurando conexão IPV6!\n");
 
@@ -220,7 +352,7 @@ int main(int argc, char *argv[]){
       return 0;
     }
 
-    printf("IPV6 configurado com sucesso!\n");
+    //printf("IPV6 configurado com sucesso!\n");
   }else{
     printf("Versão ip recebida inválida!\n");
   }
@@ -259,7 +391,7 @@ int main(int argc, char *argv[]){
       continue;
     }
 
-    //Found the lowest empty client place
+    //Found the lowest empty client place, add client, notify all users and send a list of users to new user
     for(int i=0; i < MAX_CLIENTS; i++){
       if(clients[i].id == -1){
         clients[i].id = i+1;
@@ -272,7 +404,11 @@ int main(int argc, char *argv[]){
         char *part2M = malloc(100);
 
         //Construct message setup
-        strcpy(broadMessage, "User 0");
+        if(clients[i].id >= 10){
+          strcpy(broadMessage, "User ");
+        }else{
+          strcpy(broadMessage, "User 0");
+        }
         sprintf(userIdStr, "%d", clients[i].id);
         strcpy(part2M, " joined the group!");
 
@@ -292,12 +428,41 @@ int main(int argc, char *argv[]){
             send(clients[j].socket, bufferResponse, sizeof(Payload), 0);
           }
         }
+        clearPayload(response);
+
+        //List users for new users
+        char *messageListUsers = malloc(200);
+        int countUsersAdded = 0;
+        for(int i=0; i < MAX_CLIENTS; i++){         
+          if(clients[i].id != -1){
+            if(countUsersAdded > 0){
+              strcat(messageListUsers, ", ");
+              sprintf(messageListUsers + strlen(messageListUsers), "%d", clients[i].id);   
+            }else{
+              sprintf(messageListUsers + strlen(messageListUsers), "%d", clients[i].id);
+            }   
+            countUsersAdded++;
+          }
+        }
+
+        //Build list users payload
+        response->idMsg = RES_LIST;
+        strcpy(response->message, messageListUsers);
+
+        //Prepare struct to send through socket
+        memcpy(bufferResponse, response, sizeof(Payload));
+        send(cliSock, bufferResponse, sizeof(Payload), 0);
+
+        free(userIdStr);
+        free(broadMessage);
+        free(part2M);
+        free(messageListUsers);
         break;
-      }
+      }   
     }
 
     pthread_t thread;
-    if (pthread_create(&thread, NULL, handle_client, (void *)&cliSock) != 0) {
+    if (pthread_create(&thread, NULL, handleClient, (void *)&cliSock) != 0) {
       perror("Erro ao criar a thread");
       exit(EXIT_FAILURE);
     }
