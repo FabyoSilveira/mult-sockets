@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdint.h>
 
 #define BUFFER_SIZE 1024
 #define MESSAGE_SIZE 2048
@@ -124,16 +125,30 @@ void *handleServer(void *arg) {
     }
 
     if(serverMessage.idMsg == MSG){     
-      //Added user message
-      if(serverMessage.idReceiver == -1){     
-        //Search for an empty space in DB and add the new userID
+      //Added user message or broadcast msg
+      if(serverMessage.idReceiver == (intptr_t)NULL){   
+        bool userFound = false;  
         for(int i=0; i < MAX_CLIENTS; i++){
-          if(clientsIdDb[i] == -1){
-            clientsIdDb[i] = serverMessage.idSender;
+          if(clientsIdDb[i] == serverMessage.idSender){
+            userFound = true;
             break;
           }
         }
-        printf("%s\n", serverMessage.message);
+
+        //Broadcast message
+        if(userFound){
+          printf("%s\n", serverMessage.message);
+        //Add user message
+        }else{
+          //Search for an empty space in DB and add the new userID
+          for(int i=0; i < MAX_CLIENTS; i++){
+            if(clientsIdDb[i] == -1){
+              clientsIdDb[i] = serverMessage.idSender;
+              break;
+            }
+          }
+          printf("%s\n", serverMessage.message);
+        }
 
       //Private message
       }else{
@@ -150,13 +165,13 @@ void *handleServer(void *arg) {
       
     }else if(serverMessage.idMsg == OK){
       //Confirmação de solicitação de desconexão da rede
-      if(serverMessage.idSender == -1){
+      if(serverMessage.idSender == (intptr_t)NULL){
         printf("%s\n", serverMessage.message);
         connectedToServer = 0;
         break;
 
       //Confirmação de mensagem privada
-      }else if(serverMessage.idSender != -1){
+      }else if(serverMessage.idSender != (intptr_t)NULL && serverMessage.idReceiver != (intptr_t)NULL){
         //Retrieve time from system
         time_t systemNow = time(NULL);
         struct tm* localTime = localtime(&systemNow);
@@ -185,6 +200,12 @@ void *handleServer(void *arg) {
 
   close(sock);
   pthread_exit(NULL);
+}
+
+void clearPayload(Payload *payload){
+  payload->idReceiver = (intptr_t)NULL;
+  payload->idSender = (intptr_t)NULL;
+  payload->idMsg = (intptr_t)NULL;
 }
 
 int main(int argc, char *argv[]){
@@ -260,6 +281,7 @@ int main(int argc, char *argv[]){
       //Prepare struct to send through socket
       memcpy(bufferRequest, request, sizeof(Payload));
       send(sock, bufferRequest, sizeof(Payload), 0);
+      clearPayload(request);
 
       //Wait for serverThread to set connection is over
       pthread_join(serverThread, NULL);
@@ -285,8 +307,19 @@ int main(int argc, char *argv[]){
       //Prepare struct to send through socket
       memcpy(bufferRequest, request, sizeof(Payload));
       send(sock, bufferRequest, sizeof(Payload), 0);
+      clearPayload(request);
     }else if(strstr(keyBoardBuffer, "send all") != NULL){
-      printf("send broadcast message\n");
+      char message[2048];
+      sscanf(keyBoardBuffer, "send all \"%[^\"]\"", message);
+
+      //Build payload
+      request->idMsg = MSG;
+      request->idSender = myID;
+      strcpy(request->message, message);
+      //Prepare struct to send through socket
+      memcpy(bufferRequest, request, sizeof(Payload));
+      send(sock, bufferRequest, sizeof(Payload), 0);
+      clearPayload(request);
     }  
   }
 

@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdint.h>
 
 #define BUFFER_SIZE 1024
 #define MESSAGE_SIZE 2048
@@ -157,25 +158,25 @@ void closeSockets(int serverSock, int cliSock){
 }
 
 void clearPayload(Payload *payload){
-  payload->idReceiver = -1;
-  payload->idSender = -1;
-  payload->idMsg = -1;
+  payload->idReceiver = (intptr_t)NULL;
+  payload->idSender = (intptr_t)NULL;
+  payload->idMsg = (intptr_t)NULL;
 }
 
 void *handleClient(void *arg) {
   int cliSock = *(int *)arg;
   Payload cliRequest = {
-    .idSender = -1,
-    .idMsg = -1,
-    .idReceiver = -1
+    .idSender = (intptr_t)NULL,
+    .idMsg = (intptr_t)NULL,
+    .idReceiver = (intptr_t)NULL
   };
   char bufferRequest[sizeof(Payload)];
 
   Payload *response = malloc(sizeof(Payload)); 
   *response = (Payload) {
-    .idSender = -1,
-    .idMsg = -1,
-    .idReceiver = -1
+    .idSender = (intptr_t)NULL,
+    .idMsg = (intptr_t)NULL,
+    .idReceiver = (intptr_t)NULL
   };
 
   char bufferResponse[sizeof(Payload)];
@@ -189,43 +190,96 @@ void *handleClient(void *arg) {
       break;
     }
 
-    if(cliRequest.idMsg == MSG){     
-      bool userFound = false;
-      //Search target of the message
-      for(int i=0; i < MAX_CLIENTS; i++){
-        if(clients[i].id == cliRequest.idReceiver){
-          userFound = true;
-          //Build confirmation payload
-          response->idMsg = OK;
-          strcpy(response->message, cliRequest.message);
-          response->idReceiver = cliRequest.idReceiver;
-          response->idSender = cliRequest.idSender;
+    if(cliRequest.idMsg == MSG){    
+      //Broadcast message
+      if(!cliRequest.idReceiver || cliRequest.idReceiver == (intptr_t)NULL){
+        //Retrieve time from system
+        time_t systemNow = time(NULL);
+        struct tm* localTime = localtime(&systemNow);
+        // Format string with retrieved time
+        char timeStr[6];
+        strftime(timeStr, sizeof(timeStr), "%H:%M", localTime);
 
-          //Send information that the target was found successfully
+        char *finalClientsMessage = malloc(200);
+        strcat(finalClientsMessage, "[");
+        strcat(finalClientsMessage, timeStr);
+        strcat(finalClientsMessage, "] ");
+        sprintf(finalClientsMessage + strlen(finalClientsMessage), "%02d", cliRequest.idSender);
+        strcat(finalClientsMessage, ": ");
+        strcat(finalClientsMessage, cliRequest.message);
+
+        char *finalSelfMessage = malloc(200);
+        strcat(finalSelfMessage, "[");
+        strcat(finalSelfMessage, timeStr);
+        strcat(finalSelfMessage, "] ");
+        strcat(finalSelfMessage, "-> all");
+        strcat(finalSelfMessage, ": ");
+        strcat(finalSelfMessage, cliRequest.message);
+
+        //Build message payload
+        response->idMsg = MSG;
+        response->idSender = cliRequest.idSender;
+        
+        //Server prints the message
+        printf("%s\n", finalClientsMessage);
+
+        //Send broadcast message
+        for(int i=0; i < MAX_CLIENTS; i++){
+          //Formatted to the client who is sending the broadcast
+          if(clients[i].id != -1 && clients[i].id == cliRequest.idSender){
+            strcpy(response->message, finalSelfMessage);
+            //Send message to the target
+            memcpy(bufferResponse, response, sizeof(Payload));
+            send(clients[i].socket, bufferResponse, sizeof(Payload), 0);
+          }else if(clients[i].id != -1){
+            strcpy(response->message, finalClientsMessage);
+            //Send message to the target
+            memcpy(bufferResponse, response, sizeof(Payload));
+            send(clients[i].socket, bufferResponse, sizeof(Payload), 0);
+          }
+        }
+
+        clearPayload(response);
+        free(finalClientsMessage);
+      //Private message
+      }else{
+        bool userFound = false;
+        //Search target of the message
+        for(int i=0; i < MAX_CLIENTS; i++){
+          if(clients[i].id == cliRequest.idReceiver){
+            userFound = true;
+            //Build confirmation payload
+            response->idMsg = OK;
+            strcpy(response->message, cliRequest.message);
+            response->idReceiver = cliRequest.idReceiver;
+            response->idSender = cliRequest.idSender;
+
+            //Send information that the target was found successfully
+            memcpy(bufferResponse, response, sizeof(Payload));
+            send(cliSock, bufferResponse, sizeof(Payload), 0);
+
+            //Build message payload
+            response->idMsg = MSG;
+
+            //Send message to the target
+            memcpy(bufferResponse, response, sizeof(Payload));
+            send(clients[i].socket, bufferResponse, sizeof(Payload), 0);
+            clearPayload(response);
+          }
+        }
+
+        if(!userFound){
+          //Build payload
+          char *message = "Receiver not found";
+          response->idMsg = ERROR;
+          strcpy(response->message, message);
+          response->idReceiver = cliRequest.idSender;
+
+          //Send information that the target was not found
           memcpy(bufferResponse, response, sizeof(Payload));
           send(cliSock, bufferResponse, sizeof(Payload), 0);
-
-          //Build message payload
-          response->idMsg = MSG;
-
-          //Send message to the target
-          memcpy(bufferResponse, response, sizeof(Payload));
-          send(clients[i].socket, bufferResponse, sizeof(Payload), 0);
           clearPayload(response);
         }
-      }
-
-      if(!userFound){
-        //Build payload
-        char *message = "Receiver not found";
-        response->idMsg = ERROR;
-        strcpy(response->message, message);
-        response->idReceiver = cliRequest.idSender;
-
-        //Send information that the target was not found
-        memcpy(bufferResponse, response, sizeof(Payload));
-        send(cliSock, bufferResponse, sizeof(Payload), 0);
-        clearPayload(response);
       }
 
     }else if(cliRequest.idMsg == REQ_REM){
@@ -308,18 +362,18 @@ int main(int argc, char *argv[]){
   }
 
   Payload cliRequest = {
-    .idSender = -1,
-    .idMsg = -1,
-    .idReceiver = -1
+    .idSender = (intptr_t)NULL,
+    .idMsg = (intptr_t)NULL,
+    .idReceiver = (intptr_t)NULL
   };
 
   char bufferCliRequest[sizeof(Payload)];
 
   Payload *response = malloc(sizeof(Payload)); 
   *response = (Payload) {
-    .idSender = -1,
-    .idMsg = -1,
-    .idReceiver = -1
+    .idSender = (intptr_t)NULL,
+    .idMsg = (intptr_t)NULL,
+    .idReceiver = (intptr_t)NULL
   };
 
   char bufferResponse[sizeof(Payload)];
